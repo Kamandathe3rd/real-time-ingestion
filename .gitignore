@@ -1,0 +1,46 @@
+# =========================================
+# .gitignore - Real-Time Data Ingestion
+# (PyCharm + Python + Spark + Windows)
+# =========================================
+
+# --- PyCharm / JetBrains ---
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.idea_modules/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# --- Generated data (rebuild any time with data_generator.py) ---
+data/
+*.csv
+
+# --- Spark runtime files ---
+checkpoints/
+spark-warehouse/
+metastore_db/
+derby.log
+*.log
+
+# --- Secrets ---
+.env
+*.env
+
+# --- Windows / OS junk ---
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# --- Backups / scratch ---
+*.bak
+*.tmp
+*.swp
+scratch/
