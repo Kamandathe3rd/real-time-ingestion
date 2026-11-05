@@ -10,6 +10,7 @@ import sys
 import time
 from pathlib import Path
 
+import psycopg2                                     # NEW
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.streaming import StreamingQueryListener
@@ -21,7 +22,11 @@ os.environ["PYSPARK_PYTHON"] = sys.executable
 # Folders (data/ and checkpoints/ are in .gitignore)
 BASE_DIR = Path(__file__).resolve().parent.parent
 INPUT_DIR = BASE_DIR / "data" / "input"
-CHECKPOINT_DIR = BASE_DIR / "checkpoints" / "console_preview"
+CHECKPOINT_DIR = BASE_DIR / "checkpoints" / "events_to_postgres"
+CONNECTION_FILE = BASE_DIR / "postgres_connection_details.txt"
+
+# PostgreSQL JDBC driver, downloaded by Spark from Maven Central on first run
+POSTGRES_JDBC_PACKAGE = "org.postgresql:postgresql:42.7.7"
 
 logger = logging.getLogger("spark_streaming")
 
@@ -38,6 +43,24 @@ RAW_SCHEMA = StructType([
     StructField("quantity", StringType()),
 ])
 
+# PostgreSQL tables (created by sql/postgres_setup.sql)
+EVENTS_TABLE = "events"
+STAGING_TABLE = "events_staging"
+EVENT_COLUMNS = [
+    "event_id", "event_time", "user_id", "event_type", "product_id",
+    "product_name", "category", "price", "quantity", "ingested_at",
+]
+COLUMN_LIST = ", ".join(EVENT_COLUMNS)
+
+# Copy only NEW events from staging; an event_id already in events is skipped
+MOVE_NEW_EVENTS_SQL = f"""
+    INSERT INTO {EVENTS_TABLE} ({COLUMN_LIST})
+    SELECT {COLUMN_LIST} FROM {STAGING_TABLE}
+    ON CONFLICT (event_id) DO NOTHING
+"""
+
+
+
 # Cleaning rules
 VALID_EVENT_TYPES = ["view", "add_to_cart", "purchase"]
 TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm:ss.SSS"
@@ -49,9 +72,81 @@ def create_spark_session():
              .appName("EcommerceEventStreaming")
              .master("local[*]")
              .config("spark.sql.shuffle.partitions", "4")
+             .config("spark.jars.packages", POSTGRES_JDBC_PACKAGE)  # NEW
              .getOrCreate())
     spark.sparkContext.setLogLevel("WARN")
     return spark
+
+def load_connection_details(path=CONNECTION_FILE):
+    """Read key=value lines from the connection details file into a dict."""
+    details = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            details[key.strip()] = value.strip()
+
+    missing = {"host", "port", "database", "user", "password"} - details.keys()
+    if missing:
+        raise ValueError(f"Missing in {path.name}: {', '.join(sorted(missing))}")
+    return details
+
+
+def jdbc_options(details):
+    """Build the Spark JDBC options for PostgreSQL from the connection details."""
+    return {
+        "url": f"jdbc:postgresql://{details['host']}:{details['port']}/{details['database']}",
+        "user": details["user"],
+        "password": details["password"],
+        "driver": "org.postgresql.Driver",
+    }
+
+def pg_connect(details):
+    """Open a direct PostgreSQL connection (used for SQL that Spark's JDBC writer can't run)."""
+    return psycopg2.connect(
+        host=details["host"],
+        port=details["port"],
+        dbname=details["database"],
+        user=details["user"],
+        password=details["password"],
+    )
+
+
+def count_events(details):
+    """Return the number of rows in the events table (also proves the connection works)."""
+    conn = pg_connect(details)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {EVENTS_TABLE}")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def write_to_staging(final_df, details):
+    """Replace the staging table's contents with this batch (Spark JDBC)."""
+    (final_df.select(EVENT_COLUMNS)
+        .write
+        .format("jdbc")
+        .options(**jdbc_options(details))
+        .option("dbtable", STAGING_TABLE)
+        .option("truncate", True)      # with overwrite: empty the table, keep its definition
+        .mode("overwrite")
+        .save())
+
+
+def move_new_events(details):
+    """Insert staging rows into events, skipping existing event_ids. Returns rows inserted."""
+    conn = pg_connect(details)
+    try:
+        with conn, conn.cursor() as cur:   # commits on success, rolls back on error
+            cur.execute(MOVE_NEW_EVENTS_SQL)
+            return cur.rowcount
+    finally:
+        conn.close()
+
 
 
 def read_event_stream(spark, max_files=0):
@@ -93,8 +188,8 @@ def clean_events(raw_df):
             .withColumn("ingested_at", F.current_timestamp()))
 
 
-def process_batch(batch_df, batch_id):
-    """Clean, de-duplicate and output one micro-batch."""
+def process_batch(batch_df, batch_id, details):
+    """Clean, de-duplicate and store one micro-batch in PostgreSQL."""
     start = time.perf_counter()
     batch_df.persist()   # the batch is used several times below: keep it in memory
     try:
@@ -113,18 +208,23 @@ def process_batch(batch_df, batch_id):
         ).first()
         rows_out = stats["rows_out"]
 
-        # Phase 3 replaces this preview with the write to PostgreSQL
-        final_df.show(5, truncate=False)
+        inserted = 0
+        if rows_out > 0:
+            write_to_staging(final_df, details)
+            inserted = move_new_events(details)
 
         logger.info(
-            "Batch %d: %d rows in | %d invalid dropped | %d duplicates removed | %d kept",
-            batch_id, rows_in, rows_in - rows_valid, rows_valid - rows_out, rows_out,
+            "Batch %d: %d rows in | %d invalid dropped | %d duplicates removed | "
+            "%d inserted | %d already in DB",
+            batch_id, rows_in, rows_in - rows_valid, rows_valid - rows_out,
+            inserted, rows_out - inserted,
         )
-        logger.info(
-            "Batch %d: latency avg %.0f ms, max %.0f ms | processed in %.0f ms",
-            batch_id, stats["avg_us"] / 1000, stats["max_us"] / 1000,
-            (time.perf_counter() - start) * 1000,
-        )
+        if rows_out > 0:
+            logger.info(
+                "Batch %d: latency avg %.0f ms, max %.0f ms | processed in %.0f ms",
+                batch_id, stats["avg_us"] / 1000, stats["max_us"] / 1000,
+                (time.perf_counter() - start) * 1000,
+            )
     finally:
         batch_df.unpersist()
 
@@ -180,12 +280,17 @@ def main():
     args = parse_args()
     INPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    details = load_connection_details()  # NEW
+    logger.info("PostgreSQL OK: %d rows already in %s.%s",  # NEW
+                count_events(details), details["database"], EVENTS_TABLE)  # NEW
+
+    spark = create_spark_session()
     spark = create_spark_session()
     spark.streams.addListener(ProgressLogger())
     raw_df = read_event_stream(spark, args.max_files)
 
     query = (raw_df.writeStream
-             .foreachBatch(process_batch)
+             .foreachBatch(lambda df, batch_id: process_batch(df, batch_id, details))
              .option("checkpointLocation", str(CHECKPOINT_DIR))
              .trigger(processingTime=f"{args.trigger_seconds} seconds")
              .start())
