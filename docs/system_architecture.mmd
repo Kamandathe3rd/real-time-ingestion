@@ -1,0 +1,31 @@
+flowchart TB
+    subgraph P1["1. Data generation (Python)"]
+        direction LR
+        GEN["data_generator.py<br/>fake view / add_to_cart / purchase<br/>events + 5% bad rows"]
+        TMP[("data/tmp/<br/>file being written")]
+        IN[("data/input/<br/>finished CSV files")]
+        GEN -->|"write CSV"| TMP
+        TMP -->|"atomic move"| IN
+    end
+
+    subgraph P2["2. Stream processing (Spark Structured Streaming)"]
+        direction LR
+        READ["readStream (CSV)<br/>raw string schema<br/>trigger every 5 s"]
+        CLEAN["clean_events()<br/>trim, lowercase, try_cast,<br/>drop invalid rows"]
+        DEDUP["foreachBatch<br/>dropDuplicates(event_id)<br/>log counts + latency"]
+        CKPT[("checkpoints/<br/>processed-file bookmark")]
+        READ --> CLEAN --> DEDUP
+        READ -.->|"progress"| CKPT
+    end
+
+    subgraph P3["3. Storage (PostgreSQL 18)"]
+        direction LR
+        STG[("events_staging<br/>unlogged, per batch")]
+        EVT[("events<br/>PK event_id, CHECK rules,<br/>TIMESTAMPTZ, indexes")]
+        STG -->|"INSERT ... ON CONFLICT<br/>DO NOTHING"| EVT
+    end
+
+    IN -->|"new files detected"| READ
+    DEDUP -->|"JDBC write<br/>(overwrite + truncate)"| STG
+    DEDUP -.->|"psycopg2 runs move SQL"| STG
+    EVT --> Q["verification_queries.sql<br/>counts, quality, latency, throughput"]
