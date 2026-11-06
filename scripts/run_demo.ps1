@@ -1,5 +1,3 @@
-Claude
-run_demo.ps1
 <#
 .SYNOPSIS
     Runs the whole pipeline end to end and checks the results:
@@ -204,6 +202,5 @@ foreach ($r in $Results) {
 }
 if ($Results.Status -contains "FAIL") { exit 1 } else { exit 0 }
 
-Claude finished the response
 
 
