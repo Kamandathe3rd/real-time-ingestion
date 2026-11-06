@@ -45,6 +45,8 @@ real-time-ingestion/
 ├── sql/
 │   ├── postgres_setup.sql              # lab user, database, events + staging tables
 │   └── verification_queries.sql        # counts, data quality, latency, throughput
+├── scripts/
+│   └── run_demo.ps1                    # one-command demo with PASS/FAIL checks
 └── docs/
     ├── system_architecture.png         # diagram (source: system_architecture.mmd)
     ├── system_architecture.mmd
@@ -78,6 +80,13 @@ python src\data_generator.py --events 100 --interval 8 --batches 5
 # 5. Check the results (password: spark_lab_pass)
 & "C:\Program Files\PostgreSQL\18\bin\psql.exe" -h localhost -U spark_user -d ecommerce_events -f sql\verification_queries.sql
 ```
+**Or run everything in one command** (reset, Spark, generator, checks, replay and restart tests, clean-up):
+
+```powershell
+.\scripts\run_demo.ps1            # add -Pause to step through it live
+```
+
+It ends with a PASS/FAIL summary. Details: [user guide, section 5](docs/user_guide.md#5-automated-demo-and-checks).
 
 ## How it works
 
@@ -121,3 +130,4 @@ More detail: **[docs/project_overview.md](docs/project_overview.md)**.
 | `performance_metrics.md` | [`docs/performance_metrics.md`](docs/performance_metrics.md) |
 | `system_architecture.png` | [`docs/system_architecture.png`](docs/system_architecture.png) |
 | Extra | [`sql/verification_queries.sql`](sql/verification_queries.sql), [`docs/system_architecture.mmd`](docs/system_architecture.mmd) |
+| Extra | [`sql/verification_queries.sql`](sql/verification_queries.sql), [`docs/system_architecture.mmd`](docs/system_architecture.mmd), [`scripts/run_demo.ps1`](scripts/run_demo.ps1) |

@@ -110,6 +110,39 @@ Run the generator without `--batches` to produce files until you press **Ctrl + 
 ```powershell
 & $psql -h localhost -U spark_user -d ecommerce_events -f sql\verification_queries.sql
 ```
+## 5. Automated demo and checks
+
+One script runs the whole pipeline and checks the results automatically:
+
+```powershell
+.\scripts\run_demo.ps1
+```
+
+| Step | What it does | Check |
+|---|---|---|
+| 1 | Reset (deletes `data`, `checkpoints`; empties the tables) | — |
+| 2 | Starts Spark in the background | Stops with an error if Spark fails to start |
+| 3 | Runs the generator and reads its summary | Works out the expected numbers |
+| 4 | Waits until Spark has processed every row | — |
+| 5 | Runs `verification_queries.sql` | Rows in, inserted and stored must match the expected numbers |
+| 6 | Copies an already-processed file under a new name | 0 inserted, row count unchanged |
+| 7 | Restarts Spark and waits 15 s | 0 new batches |
+| 8 | Resets again (unless `-KeepData`) | — |
+
+It ends with a summary where every line should say `PASS`; the exit code is `0` if everything
+passed and `1` otherwise. Spark's full output is saved in `logs\` (not committed).
+
+| Option | Default | Meaning |
+|---|---|---|
+| `-Events` | 100 | Events per file |
+| `-Batches` | 3 | Number of files |
+| `-Interval` | 8 | Seconds between files |
+| `-BadRate` | 0.1 | Share of bad rows |
+| `-Pause` | off | Wait for Enter before each step (live demo) |
+| `-KeepData` | off | Keep the data at the end (e.g. to browse it in pgAdmin) |
+| `-PsqlPath` | `C:\Program Files\PostgreSQL\18\bin\psql.exe` | Path to psql if PostgreSQL is installed elsewhere |
+
+Stop any Spark job running in another terminal before starting the script.
 
 Password: `spark_lab_pass`.
 
@@ -127,7 +160,7 @@ missing_user_id + negative_price + unknown_event_type) from the generator's summ
 You can also browse the table in **pgAdmin 4**: Servers → PostgreSQL 18 → Databases →
 ecommerce_events → Schemas → public → Tables → events → right-click → View/Edit Data.
 
-## 5. Options
+## 6. Options
 
 ### `data_generator.py`
 
@@ -147,7 +180,7 @@ ecommerce_events → Schemas → public → Tables → events → right-click �
 
 Both scripts show their options with `--help`.
 
-## 6. Stop and reset
+## 7. Stop and reset
 
 **Stop:** press **Ctrl + C** in each terminal. Messages such as `ERROR: The process "..." not found`,
 `SUCCESS: The process with PID ... has been terminated` or `KeyboardInterrupt while sending command`
@@ -165,9 +198,10 @@ Remove-Item -Recurse data, checkpoints -ErrorAction SilentlyContinue
 | The tables | The checkpoint still marks old files as done, so they are not reloaded |
 | `checkpoints\` | Old files are re-read, but already stored, so the log shows `0 inserted` |
 
-## 7. Troubleshooting
+## 8. Troubleshooting
 
 | Error (look for) | Cause | Fix |
 |---|---|---|
 | `UnsatisfiedLinkError ... NativeIO$Windows` | `hadoop.dll` not found | Add `C:\hadoop\bin` to `PATH`, then restart the terminal |
-|
+| `running scripts is disabled on this system` | PowerShell script policy | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, answer `Y` |
+| `run_demo.ps1 ... is not digitally signed` | File marked as downloaded from the internet | `Unblock-File .\scripts\run_demo.ps1` |
